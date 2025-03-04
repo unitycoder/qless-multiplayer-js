@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Q-Less Multiplayer Game</title>
+  <style>
+    /* Disable text selection */
+    .block {
+      -webkit-user-select: none;
+      -moz-user-select: none;
+      -ms-user-select: none;
+      user-select: none;
+    }
+    /* Grid styling */
+    #grid {
+      border-collapse: collapse;
+      margin-top: 20px;
+    }
+    #grid td {
+      width: 50px;
+      height: 50px;
+      border: 1px solid #aaa;
+      text-align: center;
+      vertical-align: middle;
+      position: relative;
+    }
+    /* Letter block styling */
+    .block {
+      width: 40px;
+      height: 40px;
+      background-color: #f0f0f0;
+      border: 1px solid #333;
+      text-align: center;
+      line-height: 40px;
+      font-size: 24px;
+      cursor: move;
+      position: absolute;
+      top: 5px;
+      left: 5px;
+    }
+    /* Indicate locked blocks */
+    .locked {
+      opacity: 0.5;
+    }
+    /* Timer display styling */
+    #roundTimer {
+      font-size: 18px;
+      margin-bottom: 10px;
+    }
+    /* Overlay to prevent interactions during break */
+    #overlay {
+      display: none;
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      background: rgba(0,0,0,0.3);
+      z-index: 1000;
+    }
+    #overlay span {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 24px;
+      background: #fff;
+      padding: 20px;
+      border: 2px solid #333;
+    }
+  </style>
+</head>
+<body>
+  <h1>Q-Less Multiplayer Game</h1>
+  <div id="roundTimer">Round Time: --</div>
+  <!-- Overlay shown when round is over -->
+  <div id="overlay"><span>Round Over - Wait for New Round</span></div>
+  <!-- The game board grid -->
+  <table id="grid"></table>
+  
+  <!-- Using CDN for Socket.IO -->
+  <script src="https://cdn.socket.io/4.8.1/socket.io.min.js" integrity="sha384-mkQ3/7FUtcGyoppY6bz/PORYoGqOl7/aSUMn2ymDOJcapfS6PHqxhRTMh1RR0Q6+" crossorigin="anonymous"></script>
+  <script>
+    // Connect to the Socket.IO server on port 3000.
+    const socket = io("http://localhost:3000");
+    
+    const ROWS = 10;
+    const COLS = 10;
+    
+    let currentRoundState = "running"; // will be updated via roundUpdate events
+    
+    // Build a 10x10 grid.
+    const gridTable = document.getElementById('grid');
+    for (let r = 0; r < ROWS; r++) {
+      const rowEl = document.createElement('tr');
+      for (let c = 0; c < COLS; c++) {
+        const cell = document.createElement('td');
+        cell.dataset.row = r;
+        cell.dataset.col = c;
+        cell.addEventListener('dragover', (e) => {
+          e.preventDefault();
+        });
+        cell.addEventListener('drop', (e) => {
+          e.preventDefault();
+          // If round is not running, do nothing.
+          if (currentRoundState !== "running") return;
+          const blockId = e.dataTransfer.getData('text/plain');
+          socket.emit('moveBlock', {
+            blockId: parseInt(blockId),
+            row: parseInt(cell.dataset.row),
+            col: parseInt(cell.dataset.col)
+          });
+        });
+        rowEl.appendChild(cell);
+      }
+      gridTable.appendChild(rowEl);
+    }
+    
+    // To keep track of rendered blocks by their ID.
+    const placedBlocks = {};
+    
+    function renderBlock(block) {
+      // Remove any existing element for this block.
+      const existing = document.querySelector(`[data-block-id="${block.id}"]`);
+      if (existing && existing.parentNode) {
+        existing.parentNode.removeChild(existing);
+      }
+      const blockDiv = document.createElement('div');
+      blockDiv.className = 'block';
+      blockDiv.textContent = block.letter;
+      blockDiv.dataset.blockId = block.id;
+      blockDiv.draggable = true;
+      
+      // Disable dragging if the block is locked by another or if round isn't running.
+      if (block.lockedBy && block.lockedBy !== socket.id || currentRoundState !== "running") {
+        blockDiv.classList.add('locked');
+        blockDiv.draggable = false;
+      } else {
+        blockDiv.classList.remove('locked');
+        blockDiv.draggable = true;
+      }
+      
+      // On dragstart, first check if round is active.
+      blockDiv.addEventListener('dragstart', (e) => {
+        if (currentRoundState !== "running") {
+          e.preventDefault();
+          return;
+        }
+        if (block.lockedBy && block.lockedBy !== socket.id) {
+          e.preventDefault();
+          return;
+        }
+        socket.emit('lockBlock', { blockId: block.id });
+        e.dataTransfer.setData('text/plain', block.id);
+      });
+      
+      const cell = document.querySelector(`td[data-row="${block.row}"][data-col="${block.col}"]`);
+      if (cell) {
+        cell.appendChild(blockDiv);
+        placedBlocks[block.id] = blockDiv;
+      }
+    }
+    
+    // Timer display element.
+    const roundTimerEl = document.getElementById('roundTimer');
+    const overlayEl = document.getElementById('overlay');
+    
+    // Update timer display.
+    socket.on('roundUpdate', (data) => {
+      const { remainingTime, roundState } = data;
+      currentRoundState = roundState;
+      roundTimerEl.textContent = roundState === "running"
+        ? `Round Time: ${remainingTime} sec`
+        : `Break Time: ${remainingTime} sec`;
+      
+      // Show overlay if round is over.
+      if (roundState === "break") {
+        overlayEl.style.display = 'block';
+      } else {
+        overlayEl.style.display = 'none';
+      }
+    });
+    
+    // When a new round starts, update the grid.
+    socket.on('newRound', (data) => {
+      const { grid: newGrid, remainingTime, roundState } = data;
+      currentRoundState = roundState;
+      roundTimerEl.textContent = `Round Time: ${remainingTime} sec`;
+      overlayEl.style.display = 'none';
+      // Clear any existing blocks.
+      for (let key in placedBlocks) {
+        const elem = placedBlocks[key];
+        if (elem.parentNode) {
+          elem.parentNode.removeChild(elem);
+        }
+      }
+      // Render blocks from the new grid.
+      for (let r = 0; r < newGrid.length; r++) {
+        for (let c = 0; c < newGrid[r].length; c++) {
+          const block = newGrid[r][c];
+          if (block) {
+            renderBlock(block);
+          }
+        }
+      }
+    });
+    
+    socket.on('initialState', (data) => {
+      const { grid: initGrid, remainingTime, roundState } = data;
+      currentRoundState = roundState;
+      roundTimerEl.textContent = roundState === "running"
+        ? `Round Time: ${remainingTime} sec`
+        : `Break Time: ${remainingTime} sec`;
+      if (roundState !== "running") {
+        overlayEl.style.display = 'block';
+      }
+      for (let r = 0; r < initGrid.length; r++) {
+        for (let c = 0; c < initGrid[r].length; c++) {
+          const block = initGrid[r][c];
+          if (block) {
+            renderBlock(block);
+          }
+        }
+      }
+    });
+    
+    socket.on('blockPlaced', (block) => {
+      renderBlock(block);
+    });
+    
+    socket.on('blockLocked', (data) => {
+      const { blockId, lockedBy } = data;
+      const blockElem = document.querySelector(`[data-block-id="${blockId}"]`);
+      if (blockElem) {
+        if (lockedBy !== socket.id) {
+          blockElem.classList.add('locked');
+          blockElem.draggable = false;
+        } else {
+          blockElem.classList.remove('locked');
+          blockElem.draggable = true;
+        }
+      }
+    });
+    
+    socket.on('blockUnlocked', (data) => {
+      const { blockId } = data;
+      const blockElem = document.querySelector(`[data-block-id="${blockId}"]`);
+      if (blockElem) {
+        blockElem.classList.remove('locked');
+        blockElem.draggable = currentRoundState === "running";
+      }
+    });
+    
+    socket.on('lockFailed', (data) => {
+      alert(`Lock failed for block ${data.blockId}: ${data.message}`);
+    });
+    
+    socket.on('roundOver', () => {
+      // Optionally show a message or disable board interactions.
+      overlayEl.style.display = 'block';
+    });
+    
+    socket.on('error', (data) => {
+      console.error(data);
+    });
+  </script>
+</body>
+</html>
